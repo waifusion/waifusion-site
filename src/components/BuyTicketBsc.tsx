@@ -1,25 +1,24 @@
+// TODO Update learn more link
+
 import React, { useEffect, useState } from "react";
 import styled from "styled-components";
-import BN from "bn.js";
+import BN, { max } from "bn.js";
 import { useTranslation } from "react-i18next";
 import { useDispatch, useSelector } from "react-redux";
-import { ContractHelper } from "../services/contract";
+import countdown from "countdown";
+
+import { ContractHelper, getAddress } from "../services/contract";
 import Input from "./Input";
 import Popup from "./Popup";
 import { selectGlobalsData } from "../state/reducers/globals";
 import {
+  getBlockNumber,
   getTicketBalance,
   getUwuMintContract,
   isWetApproved,
+  nextWaveDate,
 } from "../services/uwuHelper";
 import { selectTickets, setTickets } from "../state/reducers/user";
-
-const waveMax: Record<string, number> = {
-  "1": 1,
-  "2": 3,
-  "3": 6,
-  "4": 11,
-};
 
 const Content = styled.div`
   width: 100%;
@@ -38,6 +37,7 @@ type Props = {
   show: boolean;
   close: () => void;
   swapPrice: number;
+  wetBalance: number;
 };
 
 const BuyTicketBsc: React.FC<Props> = (props) => {
@@ -48,8 +48,10 @@ const BuyTicketBsc: React.FC<Props> = (props) => {
   const globals = useSelector(selectGlobalsData);
   const [loading, setLoading] = useState(false);
   const [wetApproved, setWetApproved] = useState(false);
-  const [nextWaveBlock, setNextWaveBlock] = useState(0);
   const [wave, setWave] = useState(1);
+  const [nextWave, setNextWave] = useState(new Date());
+  const [isLocked, setIsLocked] = useState(false);
+  const [maxPerTX, setMaxPerTX] = useState(0);
   const owned = useSelector(selectTickets);
 
   const updateWetApproved = async () => {
@@ -61,8 +63,21 @@ const BuyTicketBsc: React.FC<Props> = (props) => {
   const getWave = async () => {
     if (!globals.uwuMintContract) return;
     const contract = await getUwuMintContract(globals.uwuMintContract);
-    const wave = await contract.methods.wave().call();
+
+    const startBlock = await contract.methods.startBlock().call();
+    let wave = 0;
+    if (startBlock !== 0) {
+      const blockNumber = await getBlockNumber();
+      const waveBlockLength = await contract.methods.waveBlockLength().call();
+      const blocksSinceStart = blockNumber - startBlock;
+      wave = Math.floor(blocksSinceStart / waveBlockLength);
+    }
     setWave(Number(wave) + 1);
+    const address = await getAddress();
+    const _isLocked = await contract.methods.waveLock(wave, address).call();
+    setIsLocked(_isLocked);
+    const _maxPerTX = await contract.methods.maxPerTX(wave).call();
+    setMaxPerTX(_maxPerTX);
   };
 
   const updateTicketBalance = async () => {
@@ -71,18 +86,16 @@ const BuyTicketBsc: React.FC<Props> = (props) => {
     dispatch(setTickets(balance));
   };
 
-  const updateNextWaveBlock = async () => {
-    if (!globals.uwuMintContract) return;
-    const contract = await getUwuMintContract(globals.uwuMintContract);
-    // const _nextWaveBlock = await contract.methods.nextWaveBlock().call();
-    // setNextWaveBlock(Number(_nextWaveBlock));
+  const updateNextWave = async () => {
+    const _nextWave = await nextWaveDate();
+    setNextWave(_nextWave);
   };
 
   const updateEverything = () => {
     updateWetApproved();
     getWave();
     updateTicketBalance();
-    updateNextWaveBlock();
+    updateNextWave();
   };
 
   useEffect(() => {
@@ -112,19 +125,27 @@ const BuyTicketBsc: React.FC<Props> = (props) => {
 
   const buyTickets = async () => {
     setError("");
-    const max = waveMax[wave.toString()] - Number(owned);
-    if (Number(tickets) > max) {
-      setError(`Exceeds max of ${max} for this wave`);
+    if (Number(tickets) > maxPerTX) {
+      setError(`Exceeds max of ${maxPerTX} for this wave`);
       return;
     }
     if (Number(tickets) < 1) {
       setError("Must be a positive number");
       return;
     }
+    if (isLocked) {
+      setError("You have already minted this wave");
+      return;
+    }
+    if (Number(tickets) * props.swapPrice > props.wetBalance) {
+      setError("Not enough WET");
+      return;
+    }
 
     const mint = await getUwuMintContract(globals.uwuMintContract);
+    const address = await getAddress();
     mint.methods
-      .buy(tickets)
+      .buy(tickets, address)
       .send()
       .on("transactionHash", (hash: any) => {
         setLoading(true);
@@ -156,9 +177,7 @@ const BuyTicketBsc: React.FC<Props> = (props) => {
             <Input
               type="number"
               value={tickets}
-              placeholder={(
-                waveMax[wave.toString()] - Number(owned)
-              ).toString()}
+              placeholder={`Amount (e.g. ${maxPerTX.toString()}`}
               update={(value: string) => setTicketCount(value)}
             />
             {error && <Error>{error}</Error>}
@@ -166,8 +185,14 @@ const BuyTicketBsc: React.FC<Props> = (props) => {
         }
         header={t("uwu.getTicket")}
         body={`The current wave is ${wave}. You can get ${
-          waveMax[wave.toString()] - Number(owned)
-        } more tickets this wave. Next wave is in ${0}`}
+          isLocked ? 0 : maxPerTX
+        } more tickets this wave. Next wave is in ${countdown(
+          new Date(),
+          nextWave,
+          countdown.ALL,
+          1
+        )}`}
+        body2={`You have ${props.wetBalance} WET`}
         buttonAction={() => {
           if (!wetApproved) approveWet();
           else buyTickets();
